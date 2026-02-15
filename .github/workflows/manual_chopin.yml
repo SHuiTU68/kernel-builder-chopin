@@ -155,14 +155,16 @@ jobs:
           
           echo "SUSFS 补丁应用完成"
 
-      # ===== 内核配置 =====
+      # ===== 内核配置（严格检查）=====
       - name: 配置内核
         run: |
           cd kernel_xiaomi_chopin
           # 智能查找 defconfig
           if [ -f arch/arm64/configs/chopin_defconfig ]; then
+            echo "使用 arch/arm64/configs/chopin_defconfig"
             make ARCH=arm64 chopin_defconfig
           elif [ -f arch/arm64/configs/vendor/chopin_defconfig ]; then
+            echo "使用 arch/arm64/configs/vendor/chopin_defconfig"
             make ARCH=arm64 vendor/chopin_defconfig
           else
             DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -n1)
@@ -173,6 +175,11 @@ jobs:
               echo "❌ 未找到任何 defconfig，请手动指定"
               exit 1
             fi
+          fi
+
+          if [ ! -f .config ]; then
+            echo "❌ defconfig 执行后未生成 .config"
+            exit 1
           fi
 
           # rKSU 必需配置
@@ -189,10 +196,15 @@ jobs:
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_BINDER
           fi
 
+          if [ ! -f .config ]; then
+            echo "❌ 修改配置后 .config 丢失"
+            exit 1
+          fi
+
           make savedefconfig
           cp defconfig arch/arm64/configs/custom_defconfig
 
-       # ===== 编译内核 =====
+      # ===== 编译内核（增强镜像查找）=====
       - name: 编译内核
         run: |
           cd kernel_xiaomi_chopin
@@ -203,14 +215,29 @@ jobs:
           export LD=ld.lld-14
           make -j$(nproc) O=out ARCH=arm64 CC=clang-14 LD=ld.lld-14 LLVM=1 2>&1 | tee build.log
 
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb ../Image.gz-dtb
-          elif [ -f out/arch/arm64/boot/Image.gz ]; then
-            cp out/arch/arm64/boot/Image.gz ../Image.gz
-          else
-            echo "未找到内核镜像文件"
+          # 输出编译后的 boot 目录内容供调试
+          echo "=== 编译完成，检查 out/arch/arm64/boot/ 目录 ==="
+          ls -la out/arch/arm64/boot/ || echo "目录不存在"
+          
+          # 尝试查找内核镜像文件（支持多种常见格式）
+          IMAGE_FOUND=""
+          BOOT_DIR="out/arch/arm64/boot"
+          for img in Image.gz-dtb Image.gz Image zImage Image.bin; do
+            if [ -f "$BOOT_DIR/$img" ]; then
+              IMAGE_FOUND="$BOOT_DIR/$img"
+              echo "找到内核镜像: $IMAGE_FOUND"
+              break
+            fi
+          done
+          
+          if [ -z "$IMAGE_FOUND" ]; then
+            echo "❌ 未找到内核镜像文件，编译可能失败"
             exit 1
           fi
+          
+          # 复制到工作目录，统一命名为 Image 以便后续打包
+          cp "$IMAGE_FOUND" ../Image
+          echo "内核镜像已复制为 $(pwd)/../Image"
 
       # ===== 打包 AnyKernel3 =====
       - name: 准备 AnyKernel3
@@ -220,7 +247,11 @@ jobs:
 
       - name: 创建刷机包
         run: |
-          cp Image.gz-dtb ${{ runner.temp }}/AnyKernel3/ 2>/dev/null || cp Image.gz ${{ runner.temp }}/AnyKernel3/
+          if [ ! -f Image ]; then
+            echo "❌ Image 文件不存在于工作目录"
+            exit 1
+          fi
+          cp Image ${{ runner.temp }}/AnyKernel3/
           
           cd ${{ runner.temp }}/AnyKernel3
           echo "Kernel with rKSU" > README
