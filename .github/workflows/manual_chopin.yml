@@ -1,22 +1,22 @@
-name: 手动构建 Chopin 内核 (rKSU + SUSFS)
+name: 手动构建内核 (rKSU + SUSFS)
 
 on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: '内核源码仓库 (格式: owner/repo，例如 ChopinKernels/kernel_xiaomi_chopin_android_S)'
+        description: '内核源码仓库 (格式: owner/repo，例如 xiaomi-mt6893-dev/kernel_xiaomi_mt6893)'
         required: true
-        default: 'ChopinKernels/kernel_xiaomi_chopin_android_S'
+        default: 'xiaomi-mt6893-dev/kernel_xiaomi_mt6893'
       kernel_branch:
-        description: '内核源码分支或标签'
-        required: true
-        default: 'main'
+        description: '内核源码分支 (留空则自动使用默认分支)'
+        required: false
+        default: ''
       enable_susfs:
         description: '启用 SUSFS 功能'
         type: boolean
         default: false
       rksu_commit:
-        description: 'rKSU 的 commit 哈希值 (例如 46b695633ebce2fd87d811e45e14789725ee041ecd690cb2b1a1caf962f12ed4)'
+        description: 'rKSU 的 commit 哈希值'
         required: true
         default: '46b695633ebce2fd87d811e45e14789725ee041ecd690cb2b1a1caf962f12ed4'
 
@@ -25,16 +25,13 @@ jobs:
     name: 编译内核 (rKSU + SUSFS)
     runs-on: ubuntu-22.04
     steps:
-      # 1. 检出工作流仓库（用于存放 AnyKernel3）
       - name: 检出工作流仓库
         uses: actions/checkout@v4
 
-      # 2. 格式化内核仓库地址（处理用户可能输入的完整 URL）
       - name: 格式化仓库地址
         id: format_repo
         run: |
           RAW_REPO="${{ github.event.inputs.kernel_repo }}"
-          # 如果输入的是完整 HTTPS 地址，提取 owner/name 部分
           if [[ "$RAW_REPO" =~ ^https?://github.com/([^/]+/[^/]+)(\.git)?$ ]]; then
             CLEAN_REPO="${BASH_REMATCH[1]}"
           elif [[ "$RAW_REPO" =~ ^[^/]+/[^/]+$ ]]; then
@@ -46,26 +43,49 @@ jobs:
           echo "clean_repo=$CLEAN_REPO" >> $GITHUB_OUTPUT
           echo "使用仓库: $CLEAN_REPO"
 
-      # 3. 手动克隆内核源码（替代 actions/checkout）
-      - name: 克隆内核源码
+      # ===== 改进的克隆步骤 =====
+      - name: 克隆内核源码（自动处理分支）
+        id: clone_kernel
         run: |
           REPO="${{ steps.format_repo.outputs.clean_repo }}"
-          BRANCH="${{ github.event.inputs.kernel_branch }}"
           CLONE_URL="https://github.com/${REPO}.git"
-          echo "尝试从 $CLONE_URL 克隆分支 $BRANCH"
+          USER_BRANCH="${{ github.event.inputs.kernel_branch }}"
           
-          # 重试机制：最多尝试3次
+          # 如果用户指定了分支，先尝试用该分支克隆
+          if [ -n "$USER_BRANCH" ]; then
+            echo "尝试克隆用户指定的分支: $USER_BRANCH"
+            for i in {1..3}; do
+              echo "尝试 $i/3..."
+              if git clone --depth=1 --branch "$USER_BRANCH" "$CLONE_URL" kernel_xiaomi_chopin; then
+                echo "成功克隆分支 $USER_BRANCH"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "警告：无法克隆指定分支 $USER_BRANCH，将尝试克隆默认分支"
+          fi
+          
+          # 如果未指定分支或指定分支失败，克隆默认分支
+          echo "尝试克隆默认分支"
           for i in {1..3}; do
             echo "尝试 $i/3..."
-            git clone --depth=1 --branch "$BRANCH" "$CLONE_URL" kernel_xiaomi_chopin && break
-            if [ $i -eq 3 ]; then
-              echo "❌ 克隆失败，请检查仓库地址和分支是否存在"
-              exit 1
+            if git clone --depth=1 "$CLONE_URL" kernel_xiaomi_chopin; then
+              # 获取实际克隆的默认分支名
+              cd kernel_xiaomi_chopin
+              DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+              echo "成功克隆默认分支: $DEFAULT_BRANCH"
+              cd ..
+              exit 0
             fi
-            sleep 10
+            sleep 5
           done
+          
+          echo "❌ 所有克隆尝试均失败，请检查仓库地址"
+          exit 1
 
-      # 4. 安装系统构建依赖
+      # 后续步骤：依赖安装、工具链、rKSU集成、SUSFS、编译、打包（保持不变）
+      # 注意：后续所有路径仍使用 kernel_xiaomi_chopin
+      
       - name: 安装依赖包
         run: |
           sudo apt update
@@ -79,7 +99,6 @@ jobs:
             libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      # 5. 下载 Clang 工具链
       - name: 下载 Clang
         run: |
           mkdir -p clang-r450784d
@@ -89,14 +108,13 @@ jobs:
           echo "$(pwd)/bin" >> $GITHUB_PATH
         working-directory: ${{ runner.temp }}
 
-      # 6. 下载 GCC 交叉编译器
       - name: 下载 GCC 工具链
         run: |
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b master --depth 1
           echo "$(pwd)/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
         working-directory: ${{ runner.temp }}
 
-      # ========== 集成 rKSU (使用指定的 commit 哈希) ==========
+      # rKSU 集成
       - name: 克隆 rKSU 仓库并检出指定 commit
         run: |
           git clone https://github.com/rsuntk/KernelSU.git rksu_src
@@ -108,18 +126,14 @@ jobs:
       - name: 手动集成 rKSU 驱动到内核源码
         run: |
           cd kernel_xiaomi_chopin
-          # 创建 KernelSU 目录（如果不存在）
           mkdir -p KernelSU
-          # 复制驱动文件（从克隆的 rKSU 仓库的 kernel/ 目录）
           cp -r ${{ runner.temp }}/rksu_src/kernel/* KernelSU/
           
-          # 在内核根目录的 Kconfig 中添加对 KernelSU 的引用（如果尚未添加）
           if ! grep -q "source \"KernelSU/Kconfig\"" Kconfig; then
             echo "" >> Kconfig
             echo "source \"KernelSU/Kconfig\"" >> Kconfig
           fi
           
-          # 在内核根目录的 Makefile 中添加 KernelSU 编译项（如果尚未添加）
           if ! grep -q "obj-y += KernelSU/" Makefile; then
             echo "" >> Makefile
             echo "obj-y += KernelSU/" >> Makefile
@@ -127,53 +141,46 @@ jobs:
           
           echo "rKSU 驱动已集成 (commit: ${{ github.event.inputs.rksu_commit }})"
 
-      # ========== SUSFS 集成（可选） ==========
+      # SUSFS 集成（可选）
       - name: 集成 SUSFS 4.14 补丁
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
           cd kernel_xiaomi_chopin
-          # 克隆 SUSFS 补丁仓库 (4.14 分支)
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14
           
-          # 复制补丁和文件到内核源码相应位置
           cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
           cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch ./
           cp -r susfs4ksu/kernel_patches/fs/* fs/
           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
           
-          # 应用补丁
           cd KernelSU && patch -p1 < 10_enable_susfs_for_ksu.patch
           cd .. && patch -p1 < 50_add_susfs_in_kernel-4.14.patch
           
           echo "SUSFS 补丁应用完成"
 
-      # ========== 内核配置 ==========
+      # 内核配置
       - name: 配置内核
         run: |
           cd kernel_xiaomi_chopin
-          # 使用设备的 defconfig（请根据实际文件名修改）
-          make ARCH=arm64 chopin_defconfig
+          # 重要：请根据你的内核修改 defconfig 文件名
+          make ARCH=arm64 chopin_defconfig || echo "警告：使用默认配置，若失败请手动指定正确的 defconfig"
 
-          # rKSU 配置：非 GKI 内核使用手动钩子
           scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           scripts/config --disable CONFIG_KSU_SYSCALL_HOOK
           scripts/config --enable CONFIG_KSU_MULTI_MANAGER_SUPPORT
 
-          # SUSFS 配置（如果启用）
           if [ "${{ github.event.inputs.enable_susfs }}" == "true" ]; then
             scripts/config --enable CONFIG_KSU_SUSFS
-            # 可选 SUSFS 特性
             scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_SU
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_BINDER
           fi
 
-          # 保存配置供参考
           make savedefconfig
           cp defconfig arch/arm64/configs/custom_defconfig
 
-      # ========== 编译内核 ==========
+      # 编译内核
       - name: 编译内核
         run: |
           cd kernel_xiaomi_chopin
@@ -185,6 +192,4 @@ jobs:
 
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld 2>&1 | tee build.log
 
-          # 复制内核镜像
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp 
+          if [ -f out/arch/arm64/boot/Image.g
