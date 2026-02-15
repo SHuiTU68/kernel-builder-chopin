@@ -1,0 +1,55 @@
+name: Manual ReSukiSU Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      # --- 1. 源码配置 (避免你再填错分支) ---
+      repo_url:
+        description: '内核源码仓库 (Kernel Repo)'
+        required: true
+        default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
+      
+      repo_branch:
+        description: 'S (注意大小写! 推荐 master 或 13)'
+        required: true
+        default: 'master'
+
+      # --- 2. 你要的功能开关 (打勾=开启) ---
+      enable_kpm:
+        description: '启用 KernelSU (KPM)'
+        type: boolean
+        default: true
+      
+      enable_susfs:
+        description: '注入 SUSFS 补丁'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 调用 ReSukiSU 动作
+      - name: Run ReSukiSU Action
+        uses: ReSukiSU/ReSukiSU@main
+        env:
+          # 将上面输入框的值传给 ReSukiSU
+          KERNEL_REPO: ${{ inputs.repo_url }}
+          KERNEL_BRANCH: ${{ inputs.repo_branch }}
+          
+          # 核心开关
+          ENABLE_KERNELSU: ${{ inputs.enable_kpm }}
+          ENABLE_KERNELSU_SFS: ${{ inputs.enable_susfs }}
+          
+          # Chopin 固定配置
+          KERNEL_DEVICE: chopin
+          KERNEL_DEFCONFIG: chopin_defconfig
+          
+          # 编译器和发布配置
+          ENABLE_CCACHE: true
+          USE_ANYKERNEL3: true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
