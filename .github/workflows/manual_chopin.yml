@@ -1,25 +1,20 @@
-name: Manual ReSukiSU Build
+name: Manual ReSukiSU Build (Final Success)
 
 on:
   workflow_dispatch:
     inputs:
-      # --- 1. 源码配置 (避免你再填错分支) ---
       repo_url:
-        description: '内核源码仓库 (Kernel Repo)'
+        description: '内核源码地址'
         required: true
         default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
-      
       repo_branch:
-        description: 'S (注意大小写! 推荐 master 或 13)'
+        description: '分支名 (MIUI 13/14 建议用 master)'
         required: true
         default: 'master'
-
-      # --- 2. 你要的功能开关 (打勾=开启) ---
       enable_kpm:
-        description: '启用 KernelSU (KPM)'
+        description: '开启 KPM (KernelSU)'
         type: boolean
         default: true
-      
       enable_susfs:
         description: '注入 SUSFS 补丁'
         type: boolean
@@ -28,28 +23,42 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout
+      - name: 1. 环境准备
         uses: actions/checkout@v4
 
-      # 调用 ReSukiSU 动作
-      - name: Run ReSukiSU Action
-        uses: ReSukiSU/ReSukiSU@main
+      - name: 2. 拉取编译脚本
+        uses: actions/checkout@v4
+        with:
+          repository: ReSukiSU/ReSukiSU
+          path: resukisu_tool
+
+      - name: 3. 执行编译与打包
+        working-directory: ./resukisu_tool
+        run: |
+          # 确保脚本有权限运行
+          chmod +x *.sh
+          # 启动 ReSukiSU 主程序
+          ./build.sh
         env:
-          # 将上面输入框的值传给 ReSukiSU
+          # 基础配置
           KERNEL_REPO: ${{ inputs.repo_url }}
           KERNEL_BRANCH: ${{ inputs.repo_branch }}
-          
-          # 核心开关
-          ENABLE_KERNELSU: ${{ inputs.enable_kpm }}
-          ENABLE_KERNELSU_SFS: ${{ inputs.enable_susfs }}
-          
-          # Chopin 固定配置
           KERNEL_DEVICE: chopin
           KERNEL_DEFCONFIG: chopin_defconfig
           
-          # 编译器和发布配置
-          ENABLE_CCACHE: true
+          # 编译器配置 (这是关键，不需要你准备NDK，脚本会自动下)
+          # 使用 AOSP 官方 R487747c Clang，对 MT6893 兼容性最好
+          CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
+          
+          # 功能开关 (KPM & SUSFS)
+          ENABLE_KERNELSU: ${{ inputs.enable_kpm }}
+          ENABLE_KERNELSU_SFS: ${{ inputs.enable_susfs }}
+          
+          # 打包配置 (自动生成可刷入的ZIP)
           USE_ANYKERNEL3: true
+          ENABLE_CCACHE: true
+          
+          # 自动发布到 Releases 页面
+          CONFIRM_RELEASE: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
