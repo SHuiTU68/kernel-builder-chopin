@@ -83,15 +83,13 @@ jobs:
           echo "❌ 所有克隆尝试均失败，请检查仓库地址"
           exit 1
 
-      # 后续步骤：依赖安装、工具链、rKSU集成、SUSFS、编译、打包（保持不变）
-      # 注意：后续所有路径仍使用 kernel_xiaomi_chopin
-      
+      # ===== 修正后的依赖安装（移除了 g++-multilib）=====
       - name: 安装依赖包
         run: |
           sudo apt update
           sudo apt install -y git ccache automake flex lzop bison \
             gperf build-essential zip curl zlib1g-dev zlib1g-dev:native \
-            g++-multilib python3 python3-pip libxml2-utils bzip2 libbz2-dev \
+            python3 python3-pip libxml2-utils bzip2 libbz2-dev \
             libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush \
             schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev \
             pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl \
@@ -192,4 +190,5 @@ jobs:
 
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld 2>&1 | tee build.log
 
-          if [ -f out/arch/arm64/boot/Image.g
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb .
