@@ -1,80 +1,192 @@
-name: Build Kernel (Chopin with Manual Switches)
+name: 手动构建 Chopin 内核 (rKSU + SUSFS/KPM 开关)
 
+# 仅支持手动触发
 on:
   workflow_dispatch:
     inputs:
-      # --- 手动开关 ---
-      enable_ksu:
-        description: '是否开启 KernelSU (KPM)'
+      kernel_repo:
+        description: '内核源码仓库地址'
+        required: true
+        default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
+      kernel_branch:
+        description: '内核源码分支或标签'
+        required: true
+        default: 'main'
+      enable_kpm:
+        description: '启用 KPM 功能 (需内核支持)'
         type: boolean
-        default: true
+        default: false
       enable_susfs:
-        description: '是否注入 SUSFS 补丁'
+        description: '启用 SUSFS 功能'
         type: boolean
-        default: true
+        default: false
+      rksu_version:
+        description: 'rKSU 版本 (tag 或 main)'
+        required: true
+        default: 'v3.0.0-30-legacy'
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-kernel:
+    name: 编译内核 (rKSU + SUSFS)
+    runs-on: ubuntu-22.04
     steps:
-      - name: 1. 环境准备
+      # 1. 检出工作流仓库（用于存放 AnyKernel3）
+      - name: 检出工作流仓库
         uses: actions/checkout@v4
 
-      - name: 2. 安装必要依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev
+      # 2. 检出内核源码
+      - name: 检出内核源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.kernel_repo }}
+          ref: ${{ github.event.inputs.kernel_branch }}
+          path: kernel_xiaomi_chopin
 
-      - name: 3. 克隆内核源码
+      # 3. 安装系统构建依赖
+      - name: 安装依赖包
         run: |
-          # 使用你截图中的 Chopin 专用仓库
-          git clone --depth=1 -b master https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S kernel_source
+          sudo apt update
+          sudo apt install -y git ccache automake flex lzop bison \
+            gperf build-essential zip curl zlib1g-dev zlib1g-dev:native \
+            g++-multilib python3 python3-pip libxml2-utils bzip2 libbz2-dev \
+            libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush \
+            schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev \
+            pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl \
+            libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev \
+            libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: 4. 配置编译工具链 (Get Toolchains)
-        working-directory: kernel_source
+      # 4. 下载 Clang 工具链
+      - name: 下载 Clang
         run: |
-          # 自动拉取 AOSP 官方 Clang (与你截图中正在运行的一致)
-          mkdir -p clang
-          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz" | tar -xzC clang
+          mkdir -p clang-r450784d
+          cd clang-r450784d
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r450784d.tar.gz
+          tar -xzf clang-r450784d.tar.gz
+          echo "$(pwd)/bin" >> $GITHUB_PATH
+        working-directory: ${{ runner.temp }}
 
-      - name: 5. 注入 KernelSU (如果勾选)
-        if: inputs.enable_ksu
-        working-directory: kernel_source
+      # 5. 下载 GCC 交叉编译器
+      - name: 下载 GCC 工具链
         run: |
-          # 官方注入脚本
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b master --depth 1
+          echo "$(pwd)/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
+        working-directory: ${{ runner.temp }}
 
-      - name: 6. 注入 SUSFS 补丁 (如果勾选)
-        if: inputs.enable_susfs
-        working-directory: kernel_source
+      # ========== 关键修改：集成 rKSU ==========
+      - name: 集成 rKSU 内核驱动
         run: |
-          # 拉取针对 4.14 内核的 SUSFS 补丁库
+          cd kernel_xiaomi_chopin
+          # 使用 rKSU 官方一键集成脚本
+          # 支持 main 分支或特定 tag [citation:2]
+          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.rksu_version }}
+          echo "rKSU 集成完成"
+
+      # ========== SUSFS 集成（可选） ==========
+      - name: 集成 SUSFS 4.14 补丁
+        if: ${{ github.event.inputs.enable_susfs == 'true' }}
+        run: |
+          cd kernel_xiaomi_chopin
+          # 克隆 SUSFS 补丁仓库 (4.14 分支)
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14
-          # 应用补丁 (这里会自动寻找内核中的文件进行修改)
-          cp susfs4ksu/kernel_patches/50_add_susfs_status_codes_to_std_include.patch .
-          patch -p1 < 50_add_susfs_status_codes_to_std_include.patch || echo "Patch failed, checking logs..."
-
-      - name: 7. 执行编译
-        working-directory: kernel_source
-        run: |
-          export PATH=$PWD/clang/bin:$PATH
-          # 按照你截图中的 chopin_defconfig 进行配置
-          make O=out ARCH=arm64 chopin_defconfig
-          make -j$(nproc --all) O=out ARCH=arm64 \
-               CROSS_COMPILE=aarch64-linux-gnu- \
-               CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-               CC=clang
-
-      - name: 8. 打包 AnyKernel3 并发布
-        if: success()
-        run: |
-          # 自动打包成刷机包
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          cp kernel_source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cd AnyKernel3 && zip -r9 kernel-chopin.zip *
           
-      - name: 9. 上传产物
+          # 复制补丁和文件到内核源码相应位置
+          cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch ./
+          cp -r susfs4ksu/kernel_patches/fs/* fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          # 应用补丁
+          cd KernelSU && patch -p1 < 10_enable_susfs_for_ksu.patch
+          cd .. && patch -p1 < 50_add_susfs_in_kernel-4.14.patch
+          
+          echo "SUSFS 补丁应用完成"
+
+      # ========== 内核配置 ==========
+      - name: 配置内核
+        run: |
+          cd kernel_xiaomi_chopin
+          # 使用设备的 defconfig（请根据实际文件名修改）
+          make ARCH=arm64 chopin_defconfig
+
+          # rKSU 自动处理了 KernelSU 基础配置，但需确保钩子方式正确 [citation:2]
+          # 对于 4.14 非 GKI 内核，应使用手动钩子
+          scripts/config --enable CONFIG_KSU_MANUAL_HOOK
+          scripts/config --disable CONFIG_KSU_SYSCALL_HOOK
+
+          # 启用多管理器支持（兼容各种管理器应用）
+          scripts/config --enable CONFIG_KSU_MULTI_MANAGER_SUPPORT
+
+          # SUSFS 开关（如果启用）
+          if [ "${{ github.event.inputs.enable_susfs }}" == "true" ]; then
+            scripts/config --enable CONFIG_KSU_SUSFS
+            # 可选的 SUSFS 特性
+            scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+            scripts/config --enable CONFIG_KSU_SUSFS_SUS_SU
+            scripts/config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
+            scripts/config --enable CONFIG_KSU_SUSFS_SUS_BINDER
+          fi
+
+          # KPM 开关（如果内核支持）
+          if [ "${{ github.event.inputs.enable_kpm }}" == "true" ]; then
+            scripts/config --enable CONFIG_KPM_SUPPORT
+          else
+            scripts/config --disable CONFIG_KPM_SUPPORT
+          fi
+
+          # 保存配置供参考
+          make savedefconfig
+          cp defconfig arch/arm64/configs/custom_defconfig
+
+      # ========== 编译内核 ==========
+      - name: 编译内核
+        run: |
+          cd kernel_xiaomi_chopin
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+
+          make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld 2>&1 | tee build.log
+
+          # 复制内核镜像
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb ../Image.gz-dtb
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz ../Image.gz
+          else
+            echo "未找到内核镜像文件"
+            exit 1
+          fi
+
+      # ========== 打包为刷机包 ==========
+      - name: 准备 AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master AnyKernel3
+        working-directory: ${{ runner.temp }}
+
+      - name: 创建刷机包
+        run: |
+          # 复制内核镜像
+          cp Image.gz-dtb ${{ runner.temp }}/AnyKernel3/ 2>/dev/null || cp Image.gz ${{ runner.temp }}/AnyKernel3/
+          
+          # 创建版本信息文件
+          cd ${{ runner.temp }}/AnyKernel3
+          echo "Chopin Kernel with rKSU" > README
+          echo "Build date: $(date)" >> README
+          echo "rKSU version: ${{ github.event.inputs.rksu_version }}" >> README
+          echo "SUSFS: ${{ github.event.inputs.enable_susfs }}" >> README
+          echo "KPM: ${{ github.event.inputs.enable_kpm }}" >> README
+          
+          # 打包
+          zip -r9 kernel-chopin-rksu-$(date +%Y%m%d-%H%M).zip * -x .git README.md *placeholder
+          mv kernel-chopin-rksu-*.zip $GITHUB_WORKSPACE/
+
+      # ========== 上传构建产物 ==========
+      - name: 上传内核刷机包
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-chopin-zip
-          path: AnyKernel3/kernel-chopin.zip
+          name: chopin-kernel-rksu-susfs
+          path: ./*.zip
+          if-no-files-found: error
