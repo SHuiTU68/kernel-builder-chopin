@@ -8,7 +8,7 @@ on:
         required: true
         default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
       repo_branch:
-        description: '分支名 (MIUI 13/14 建议用 master)'
+        description: '分支名 (如 master)'
         required: true
         default: 'master'
       enable_kpm:
@@ -27,38 +27,33 @@ jobs:
       - name: 1. 环境准备
         uses: actions/checkout@v4
 
-      - name: 2. 拉取编译脚本
-        uses: actions/checkout@v4
-        with:
-          repository: ReSukiSU/ReSukiSU
-          path: resukisu_tool
+      - name: 2. 获取编译工具 (直接放在根目录)
+        run: |
+          # 直接克隆 ReSukiSU 仓库的内容到当前目录
+          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git .
 
       - name: 3. 执行编译与打包
-        working-directory: ./resukisu_tool
         run: |
-          # 确保脚本有权限运行
+          # 确保脚本有权限
           chmod +x *.sh
-          # 启动 ReSukiSU 主程序
+          # 运行主脚本
           ./build.sh
         env:
-          # 基础配置
+          # 源码与分支
           KERNEL_REPO: ${{ inputs.repo_url }}
           KERNEL_BRANCH: ${{ inputs.repo_branch }}
           KERNEL_DEVICE: chopin
           KERNEL_DEFCONFIG: chopin_defconfig
           
-          # 编译器配置 (这是关键，不需要你准备NDK，脚本会自动下)
-          # 使用 AOSP 官方 R487747c Clang，对 MT6893 兼容性最好
-          CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
-          
-          # 功能开关 (KPM & SUSFS)
+          # 核心功能开关
           ENABLE_KERNELSU: ${{ inputs.enable_kpm }}
           ENABLE_KERNELSU_SFS: ${{ inputs.enable_susfs }}
           
-          # 打包配置 (自动生成可刷入的ZIP)
+          # 编译器 (由脚本自动下载，无需NDK)
+          CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
+          
+          # 自动化打包与发布
           USE_ANYKERNEL3: true
           ENABLE_CCACHE: true
-          
-          # 自动发布到 Releases 页面
           CONFIRM_RELEASE: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
