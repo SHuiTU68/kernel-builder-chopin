@@ -24,35 +24,36 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 环境准备
-        uses: actions/checkout@v4
-
-      - name: 2. 获取编译工具 (直接放在根目录)
+      - name: 1. 环境清理与准备
         run: |
-          # 直接克隆 ReSukiSU 仓库的内容到当前目录
+          # 彻底清空当前目录，防止 git clone 冲突
+          rm -rf ./*
+          rm -rf .git
+          # 直接克隆 ReSukiSU 工具到根目录
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git .
 
-      - name: 3. 执行编译与打包
+      - name: 2. 执行编译与打包
         run: |
-          # 确保脚本有权限
+          # 确保脚本具备执行权限
           chmod +x *.sh
-          # 运行主脚本
+          # 运行编译主脚本
           ./build.sh
         env:
-          # 源码与分支
+          # --- 基础配置 ---
           KERNEL_REPO: ${{ inputs.repo_url }}
           KERNEL_BRANCH: ${{ inputs.repo_branch }}
           KERNEL_DEVICE: chopin
           KERNEL_DEFCONFIG: chopin_defconfig
           
-          # 核心功能开关
+          # --- 核心功能开关 ---
           ENABLE_KERNELSU: ${{ inputs.enable_kpm }}
           ENABLE_KERNELSU_SFS: ${{ inputs.enable_susfs }}
           
-          # 编译器 (由脚本自动下载，无需NDK)
+          # --- 编译器配置 ---
+          # 脚本会自动下载此 Clang，无需本地 NDK
           CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
           
-          # 自动化打包与发布
+          # --- 打包与发布 ---
           USE_ANYKERNEL3: true
           ENABLE_CCACHE: true
           CONFIRM_RELEASE: true
