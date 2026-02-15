@@ -3,7 +3,7 @@
     "kernelSource": {
       "name": "android_gki_kernel_4.14_common",
       "repo": "https://github.com/AbzRaider/android_kernel_xiaomi_mt6893",
-      "branch": "MiUi",
+      "branch": "lineage-21",
       "device": "gki",
       "defconfig": "gki_defconfig"
     },
