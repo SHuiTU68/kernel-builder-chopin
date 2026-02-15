@@ -1,27 +1,23 @@
-name: 手动构建 Chopin 内核 (rKSU + SUSFS/KPM 开关)
+name: 手动构建 Chopin 内核 (rKSU + SUSFS)
 
 # 仅支持手动触发
 on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: '内核源码仓库地址'
+        description: '内核源码仓库 (格式: owner/repo)'
         required: true
         default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
       kernel_branch:
         description: '内核源码分支或标签'
         required: true
         default: 'main'
-      enable_kpm:
-        description: '启用 KPM 功能 (需内核支持)'
-        type: boolean
-        default: false
       enable_susfs:
         description: '启用 SUSFS 功能'
         type: boolean
         default: false
       rksu_version:
-        description: 'rKSU 版本 (tag 或 main)'
+        description: 'rKSU 版本 (tag 或分支，如 v3.0.0-30-legacy)'
         required: true
         default: 'v3.0.0-30-legacy'
 
@@ -34,7 +30,7 @@ jobs:
       - name: 检出工作流仓库
         uses: actions/checkout@v4
 
-      # 2. 检出内核源码
+      # 2. 检出内核源码（使用修正后的 repository 格式）
       - name: 检出内核源码
         uses: actions/checkout@v4
         with:
@@ -73,14 +69,13 @@ jobs:
           echo "$(pwd)/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
         working-directory: ${{ runner.temp }}
 
-      # ========== 关键修改：集成 rKSU ==========
+      # ========== 集成 rKSU ==========
       - name: 集成 rKSU 内核驱动
         run: |
           cd kernel_xiaomi_chopin
-          # 使用 rKSU 官方一键集成脚本
-          # 支持 main 分支或特定 tag [citation:2]
+          # 使用 rKSU 官方一键集成脚本（支持 tag 或分支）
           curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.rksu_version }}
-          echo "rKSU 集成完成"
+          echo "rKSU 集成完成 (版本: ${{ github.event.inputs.rksu_version }})"
 
       # ========== SUSFS 集成（可选） ==========
       - name: 集成 SUSFS 4.14 补丁
@@ -109,30 +104,22 @@ jobs:
           # 使用设备的 defconfig（请根据实际文件名修改）
           make ARCH=arm64 chopin_defconfig
 
-          # rKSU 自动处理了 KernelSU 基础配置，但需确保钩子方式正确 [citation:2]
-          # 对于 4.14 非 GKI 内核，应使用手动钩子
+          # rKSU 配置：非 GKI 内核使用手动钩子
           scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           scripts/config --disable CONFIG_KSU_SYSCALL_HOOK
-
-          # 启用多管理器支持（兼容各种管理器应用）
           scripts/config --enable CONFIG_KSU_MULTI_MANAGER_SUPPORT
 
-          # SUSFS 开关（如果启用）
+          # SUSFS 配置（如果启用）
           if [ "${{ github.event.inputs.enable_susfs }}" == "true" ]; then
             scripts/config --enable CONFIG_KSU_SUSFS
-            # 可选的 SUSFS 特性
+            # 可选 SUSFS 特性
             scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_SU
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_BINDER
           fi
 
-          # KPM 开关（如果内核支持）
-          if [ "${{ github.event.inputs.enable_kpm }}" == "true" ]; then
-            scripts/config --enable CONFIG_KPM_SUPPORT
-          else
-            scripts/config --disable CONFIG_KPM_SUPPORT
-          fi
+          # KPM 功能已完全移除
 
           # 保存配置供参考
           make savedefconfig
@@ -177,7 +164,6 @@ jobs:
           echo "Build date: $(date)" >> README
           echo "rKSU version: ${{ github.event.inputs.rksu_version }}" >> README
           echo "SUSFS: ${{ github.event.inputs.enable_susfs }}" >> README
-          echo "KPM: ${{ github.event.inputs.enable_kpm }}" >> README
           
           # 打包
           zip -r9 kernel-chopin-rksu-$(date +%Y%m%d-%H%M).zip * -x .git README.md *placeholder
