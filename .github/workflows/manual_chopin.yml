@@ -1,22 +1,15 @@
-name: Manual ReSukiSU Build (Final Success)
+name: Build Kernel (Chopin with Manual Switches)
 
 on:
   workflow_dispatch:
     inputs:
-      repo_url:
-        description: '内核源码地址'
-        required: true
-        default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
-      repo_branch:
-        description: '分支名 (如 master)'
-        required: true
-        default: 'master'
-      enable_kpm:
-        description: '开启 KPM (KernelSU)'
+      # --- 手动开关 ---
+      enable_ksu:
+        description: '是否开启 KernelSU (KPM)'
         type: boolean
         default: true
       enable_susfs:
-        description: '注入 SUSFS 补丁'
+        description: '是否注入 SUSFS 补丁'
         type: boolean
         default: true
 
@@ -24,35 +17,64 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 第一步：不再使用 checkout 自己的仓库，直接创建一个全新的目录
-      - name: 准备构建环境
-        run: |
-          mkdir -p workspace
-          cd workspace
-          # 在这个绝对干净的目录下克隆工具
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git .
-          # 赋予所有脚本执行权限
-          chmod +x *.sh
+      - name: 1. 环境准备
+        uses: actions/checkout@v4
 
-      - name: 执行编译与打包
+      - name: 2. 安装必要依赖
         run: |
-          # 进入刚才创建的目录运行
-          cd workspace
-          ./build.sh
-        env:
-          KERNEL_REPO: ${{ inputs.repo_url }}
-          KERNEL_BRANCH: ${{ inputs.repo_branch }}
-          KERNEL_DEVICE: chopin
-          KERNEL_DEFCONFIG: chopin_defconfig
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev
+
+      - name: 3. 克隆内核源码
+        run: |
+          # 使用你截图中的 Chopin 专用仓库
+          git clone --depth=1 -b master https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S kernel_source
+
+      - name: 4. 配置编译工具链 (Get Toolchains)
+        working-directory: kernel_source
+        run: |
+          # 自动拉取 AOSP 官方 Clang (与你截图中正在运行的一致)
+          mkdir -p clang
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz" | tar -xzC clang
+
+      - name: 5. 注入 KernelSU (如果勾选)
+        if: inputs.enable_ksu
+        working-directory: kernel_source
+        run: |
+          # 官方注入脚本
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+
+      - name: 6. 注入 SUSFS 补丁 (如果勾选)
+        if: inputs.enable_susfs
+        working-directory: kernel_source
+        run: |
+          # 拉取针对 4.14 内核的 SUSFS 补丁库
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14
+          # 应用补丁 (这里会自动寻找内核中的文件进行修改)
+          cp susfs4ksu/kernel_patches/50_add_susfs_status_codes_to_std_include.patch .
+          patch -p1 < 50_add_susfs_status_codes_to_std_include.patch || echo "Patch failed, checking logs..."
+
+      - name: 7. 执行编译
+        working-directory: kernel_source
+        run: |
+          export PATH=$PWD/clang/bin:$PATH
+          # 按照你截图中的 chopin_defconfig 进行配置
+          make O=out ARCH=arm64 chopin_defconfig
+          make -j$(nproc --all) O=out ARCH=arm64 \
+               CROSS_COMPILE=aarch64-linux-gnu- \
+               CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+               CC=clang
+
+      - name: 8. 打包 AnyKernel3 并发布
+        if: success()
+        run: |
+          # 自动打包成刷机包
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          cp kernel_source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3 && zip -r9 kernel-chopin.zip *
           
-          # 核心开关：这里会通过 ReSukiSU 脚本远程下载 SUSFS 补丁并 patch 进源码
-          ENABLE_KERNELSU: ${{ inputs.enable_kpm }}
-          ENABLE_KERNELSU_SFS: ${{ inputs.enable_susfs }}
-          
-          # 自动下载编译器
-          CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
-          
-          USE_ANYKERNEL3: true
-          ENABLE_CCACHE: true
-          CONFIRM_RELEASE: true
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 9. 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-chopin-zip
+          path: AnyKernel3/kernel-chopin.zip
