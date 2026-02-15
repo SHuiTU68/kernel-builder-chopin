@@ -1,13 +1,12 @@
 name: 手动构建 Chopin 内核 (rKSU + SUSFS)
 
-# 仅支持手动触发
 on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: '内核源码仓库 (格式: owner/repo)'
+        description: '内核源码仓库 (格式: owner/repo，例如 ChopinKernels/kernel_xiaomi_chopin_android_S)'
         required: true
-        default: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S'
+        default: 'ChopinKernels/kernel_xiaomi_chopin_android_S'
       kernel_branch:
         description: '内核源码分支或标签'
         required: true
@@ -16,10 +15,10 @@ on:
         description: '启用 SUSFS 功能'
         type: boolean
         default: false
-      rksu_version:
-        description: 'rKSU 版本 (tag 或分支，如 v3.0.0-30-legacy)'
+      rksu_commit:
+        description: 'rKSU 的 commit 哈希值 (例如 46b695633ebce2fd87d811e45e14789725ee041ecd690cb2b1a1caf962f12ed4)'
         required: true
-        default: 'v3.0.0-30-legacy'
+        default: '46b695633ebce2fd87d811e45e14789725ee041ecd690cb2b1a1caf962f12ed4'
 
 jobs:
   build-kernel:
@@ -30,15 +29,32 @@ jobs:
       - name: 检出工作流仓库
         uses: actions/checkout@v4
 
-      # 2. 检出内核源码（使用修正后的 repository 格式）
+      # 2. 格式化内核仓库地址（处理用户可能输入的完整 URL）
+      - name: 格式化仓库地址
+        id: format_repo
+        run: |
+          RAW_REPO="${{ github.event.inputs.kernel_repo }}"
+          # 如果输入的是完整 HTTPS 地址，提取 owner/name 部分
+          if [[ "$RAW_REPO" =~ ^https?://github.com/([^/]+/[^/]+)(\.git)?$ ]]; then
+            CLEAN_REPO="${BASH_REMATCH[1]}"
+          elif [[ "$RAW_REPO" =~ ^[^/]+/[^/]+$ ]]; then
+            CLEAN_REPO="$RAW_REPO"
+          else
+            echo "❌ 无法识别的仓库格式: $RAW_REPO"
+            exit 1
+          fi
+          echo "clean_repo=$CLEAN_REPO" >> $GITHUB_OUTPUT
+          echo "使用仓库: $CLEAN_REPO"
+
+      # 3. 检出内核源码（使用格式化后的仓库名）
       - name: 检出内核源码
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.kernel_repo }}
+          repository: ${{ steps.format_repo.outputs.clean_repo }}
           ref: ${{ github.event.inputs.kernel_branch }}
           path: kernel_xiaomi_chopin
 
-      # 3. 安装系统构建依赖
+      # 4. 安装系统构建依赖
       - name: 安装依赖包
         run: |
           sudo apt update
@@ -52,7 +68,7 @@ jobs:
             libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      # 4. 下载 Clang 工具链
+      # 5. 下载 Clang 工具链
       - name: 下载 Clang
         run: |
           mkdir -p clang-r450784d
@@ -62,20 +78,43 @@ jobs:
           echo "$(pwd)/bin" >> $GITHUB_PATH
         working-directory: ${{ runner.temp }}
 
-      # 5. 下载 GCC 交叉编译器
+      # 6. 下载 GCC 交叉编译器
       - name: 下载 GCC 工具链
         run: |
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b master --depth 1
           echo "$(pwd)/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
         working-directory: ${{ runner.temp }}
 
-      # ========== 集成 rKSU ==========
-      - name: 集成 rKSU 内核驱动
+      # ========== 集成 rKSU (使用指定的 commit 哈希) ==========
+      - name: 克隆 rKSU 仓库并检出指定 commit
+        run: |
+          git clone https://github.com/rsuntk/KernelSU.git rksu_src
+          cd rksu_src
+          git checkout ${{ github.event.inputs.rksu_commit }}
+          echo "已检出 commit: $(git rev-parse HEAD)"
+        working-directory: ${{ runner.temp }}
+
+      - name: 手动集成 rKSU 驱动到内核源码
         run: |
           cd kernel_xiaomi_chopin
-          # 使用 rKSU 官方一键集成脚本（支持 tag 或分支）
-          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.rksu_version }}
-          echo "rKSU 集成完成 (版本: ${{ github.event.inputs.rksu_version }})"
+          # 创建 KernelSU 目录（如果不存在）
+          mkdir -p KernelSU
+          # 复制驱动文件（从克隆的 rKSU 仓库的 kernel/ 目录）
+          cp -r ${{ runner.temp }}/rksu_src/kernel/* KernelSU/
+          
+          # 在内核根目录的 Kconfig 中添加对 KernelSU 的引用（如果尚未添加）
+          if ! grep -q "source \"KernelSU/Kconfig\"" Kconfig; then
+            echo "" >> Kconfig
+            echo "source \"KernelSU/Kconfig\"" >> Kconfig
+          fi
+          
+          # 在内核根目录的 Makefile 中添加 KernelSU 编译项（如果尚未添加）
+          if ! grep -q "obj-y += KernelSU/" Makefile; then
+            echo "" >> Makefile
+            echo "obj-y += KernelSU/" >> Makefile
+          fi
+          
+          echo "rKSU 驱动已集成 (commit: ${{ github.event.inputs.rksu_commit }})"
 
       # ========== SUSFS 集成（可选） ==========
       - name: 集成 SUSFS 4.14 补丁
@@ -119,8 +158,6 @@ jobs:
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_BINDER
           fi
 
-          # KPM 功能已完全移除
-
           # 保存配置供参考
           make savedefconfig
           cp defconfig arch/arm64/configs/custom_defconfig
@@ -150,29 +187,4 @@ jobs:
       # ========== 打包为刷机包 ==========
       - name: 准备 AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git -b master AnyKernel3
-        working-directory: ${{ runner.temp }}
-
-      - name: 创建刷机包
-        run: |
-          # 复制内核镜像
-          cp Image.gz-dtb ${{ runner.temp }}/AnyKernel3/ 2>/dev/null || cp Image.gz ${{ runner.temp }}/AnyKernel3/
-          
-          # 创建版本信息文件
-          cd ${{ runner.temp }}/AnyKernel3
-          echo "Chopin Kernel with rKSU" > README
-          echo "Build date: $(date)" >> README
-          echo "rKSU version: ${{ github.event.inputs.rksu_version }}" >> README
-          echo "SUSFS: ${{ github.event.inputs.enable_susfs }}" >> README
-          
-          # 打包
-          zip -r9 kernel-chopin-rksu-$(date +%Y%m%d-%H%M).zip * -x .git README.md *placeholder
-          mv kernel-chopin-rksu-*.zip $GITHUB_WORKSPACE/
-
-      # ========== 上传构建产物 ==========
-      - name: 上传内核刷机包
-        uses: actions/upload-artifact@v4
-        with:
-          name: chopin-kernel-rksu-susfs
-          path: ./*.zip
-          if-no-files-found: error
+          git clone https://github.com/osm0sis/AnyKernel3
