@@ -2,8 +2,8 @@
   {
     "kernelSource": {
       "name": "android_gki_kernel_4.14_common",
-      "repo": "https://github.com/AbzRaider/android_kernel_xiaomi_mt6893",
-      "branch": "lineage-21",
+      "repo": "https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S",
+      "branch": "S",
       "device": "gki",
       "defconfig": "gki_defconfig"
     },
