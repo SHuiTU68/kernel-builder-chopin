@@ -15,10 +15,10 @@ on:
         description: '启用 SUSFS 功能'
         type: boolean
         default: false
-      rksu_commit:
-        description: 'rKSU 的 commit 哈希值'
+      rksu_version:
+        description: 'rKSU 版本 (commit 哈希 或 tag，例如 v3.0.0-30-legacy)'
         required: true
-        default: '46b695633ebce2fd87d811e45e14789725ee041ecd690cb2b1a1caf962f12ed4'
+        default: 'v3.0.0-30-legacy'
 
 jobs:
   build-kernel:
@@ -80,7 +80,7 @@ jobs:
           echo "❌ 所有克隆尝试均失败，请检查仓库地址"
           exit 1
 
-      # ===== 安装依赖包（包含 Clang 和交叉 GCC）=====
+      # ===== 安装依赖包 =====
       - name: 安装依赖包
         run: |
           sudo apt update
@@ -95,20 +95,29 @@ jobs:
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             clang-14 lld-14 llvm-14
 
-      # 验证工具版本（可选）
       - name: 验证工具链
         run: |
           clang-14 --version
           aarch64-linux-gnu-gcc --version
           ld.lld-14 --version
 
-      # ===== rKSU 集成 =====
-      - name: 克隆 rKSU 仓库并检出指定 commit
+      # ===== rKSU 集成（增强容错）=====
+      - name: 克隆 rKSU 仓库并尝试检出指定版本
+        id: rksu_clone
         run: |
           git clone https://github.com/rsuntk/KernelSU.git rksu_src
           cd rksu_src
-          git checkout ${{ github.event.inputs.rksu_commit }}
-          echo "已检出 commit: $(git rev-parse HEAD)"
+          VERSION="${{ github.event.inputs.rksu_version }}"
+          echo "尝试检出版本: $VERSION"
+          if git rev-parse --verify "$VERSION^{commit}" >/dev/null 2>&1; then
+            git checkout "$VERSION"
+            echo "✅ 成功检出版本: $VERSION"
+          else
+            echo "⚠️ 版本 $VERSION 不存在，将使用默认分支 main"
+            git checkout main
+            echo "rksu_actual_version=main" >> $GITHUB_OUTPUT
+          fi
+          echo "实际使用的 commit: $(git rev-parse HEAD)"
         working-directory: ${{ runner.temp }}
 
       - name: 手动集成 rKSU 驱动到内核源码
@@ -127,7 +136,7 @@ jobs:
             echo "obj-y += KernelSU/" >> Makefile
           fi
           
-          echo "rKSU 驱动已集成 (commit: ${{ github.event.inputs.rksu_commit }})"
+          echo "rKSU 驱动已集成"
 
       # ===== SUSFS 集成（可选）=====
       - name: 集成 SUSFS 4.14 补丁
@@ -150,13 +159,12 @@ jobs:
       - name: 配置内核
         run: |
           cd kernel_xiaomi_chopin
-          # 请根据实际内核修改 defconfig 文件名，此处给出智能查找示例
+          # 智能查找 defconfig
           if [ -f arch/arm64/configs/chopin_defconfig ]; then
             make ARCH=arm64 chopin_defconfig
           elif [ -f arch/arm64/configs/vendor/chopin_defconfig ]; then
             make ARCH=arm64 vendor/chopin_defconfig
           else
-            # 尝试自动查找第一个 defconfig
             DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -n1)
             if [ -n "$DEFCONFIG" ]; then
               echo "使用找到的配置文件: $DEFCONFIG"
@@ -167,12 +175,12 @@ jobs:
             fi
           fi
 
-          # 启用 rKSU 必需配置
+          # rKSU 必需配置
           scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           scripts/config --disable CONFIG_KSU_SYSCALL_HOOK
           scripts/config --enable CONFIG_KSU_MULTI_MANAGER_SUPPORT
 
-          # 启用 SUSFS 配置（如果启用）
+          # SUSFS 配置
           if [ "${{ github.event.inputs.enable_susfs }}" == "true" ]; then
             scripts/config --enable CONFIG_KSU_SUSFS
             scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
@@ -181,11 +189,10 @@ jobs:
             scripts/config --enable CONFIG_KSU_SUSFS_SUS_BINDER
           fi
 
-          # 保存配置
           make savedefconfig
           cp defconfig arch/arm64/configs/custom_defconfig
 
-      # ===== 编译内核 =====
+       # ===== 编译内核 =====
       - name: 编译内核
         run: |
           cd kernel_xiaomi_chopin
@@ -194,10 +201,8 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang-14
           export LD=ld.lld-14
-          # 使用 LLVM=1 让内核构建系统尽可能使用 LLVM 工具
           make -j$(nproc) O=out ARCH=arm64 CC=clang-14 LD=ld.lld-14 LLVM=1 2>&1 | tee build.log
 
-          # 复制内核镜像
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
             cp out/arch/arm64/boot/Image.gz-dtb ../Image.gz-dtb
           elif [ -f out/arch/arm64/boot/Image.gz ]; then
@@ -220,7 +225,7 @@ jobs:
           cd ${{ runner.temp }}/AnyKernel3
           echo "Kernel with rKSU" > README
           echo "Build date: $(date)" >> README
-          echo "rKSU commit: ${{ github.event.inputs.rksu_commit }}" >> README
+          echo "rKSU version: ${{ github.event.inputs.rksu_version }}" >> README
           echo "SUSFS: ${{ github.event.inputs.enable_susfs }}" >> README
           
           zip -r9 kernel-$(date +%Y%m%d-%H%M).zip * -x .git README.md *placeholder
