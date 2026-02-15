@@ -51,7 +51,6 @@ jobs:
           CLONE_URL="https://github.com/${REPO}.git"
           USER_BRANCH="${{ github.event.inputs.kernel_branch }}"
           
-          # 如果用户指定了分支，先尝试用该分支克隆
           if [ -n "$USER_BRANCH" ]; then
             echo "尝试克隆用户指定的分支: $USER_BRANCH"
             for i in {1..3}; do
@@ -65,12 +64,10 @@ jobs:
             echo "警告：无法克隆指定分支 $USER_BRANCH，将尝试克隆默认分支"
           fi
           
-          # 如果未指定分支或指定分支失败，克隆默认分支
           echo "尝试克隆默认分支"
           for i in {1..3}; do
             echo "尝试 $i/3..."
             if git clone --depth=1 "$CLONE_URL" kernel_xiaomi_chopin; then
-              # 获取实际克隆的默认分支名
               cd kernel_xiaomi_chopin
               DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
               echo "成功克隆默认分支: $DEFAULT_BRANCH"
@@ -83,7 +80,7 @@ jobs:
           echo "❌ 所有克隆尝试均失败，请检查仓库地址"
           exit 1
 
-      # ===== 修正后的依赖安装（移除了 g++-multilib）=====
+      # ===== 修正后的依赖安装（已移除 g++-multilib）=====
       - name: 安装依赖包
         run: |
           sudo apt update
@@ -97,15 +94,46 @@ jobs:
             libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
+      # ===== 改进的 Clang 下载（多版本备选 + 后备源）=====
       - name: 下载 Clang
         run: |
-          mkdir -p clang-r450784d
-          cd clang-r450784d
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r450784d.tar.gz
-          tar -xzf clang-r450784d.tar.gz
+          mkdir -p clang
+          cd clang
+          # 尝试多个可能的 Clang 版本（按可靠性排序）
+          VERSIONS=("clang-r416183b" "clang-r450784e" "clang-r487747c" "clang-r498229b")
+          SUCCESS=false
+          for VER in "${VERSIONS[@]}"; do
+            URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/${VER}.tar.gz"
+            echo "尝试下载 $URL ..."
+            # 先检查 URL 是否存在（不下载）
+            if wget --spider --timeout=10 "$URL" 2>/dev/null; then
+              echo "URL 有效，正在下载 ${VER}..."
+              if wget --timeout=30 -O clang.tar.gz "$URL" && tar -xzf clang.tar.gz; then
+                SUCCESS=true
+                break
+              fi
+            else
+              echo "$VER 不可用，尝试下一个..."
+            fi
+          done
+          
+          if [ "$SUCCESS" = false ]; then
+            echo "所有 AOSP 源均失败，尝试从 ZyCromerZ 的 GitHub 仓库下载..."
+            # 使用 ZyCromerZ 预构建的 Clang（版本 19.0.0git，基于 LLVM 19）
+            GH_URL="https://github.com/ZyCromerZ/Clang/releases/download/19.0.0git-20241113/Clang-19.0.0git-20241113.tar.gz"
+            wget --timeout=30 -O clang.tar.gz "$GH_URL" && tar -xzf clang.tar.gz && SUCCESS=true
+          fi
+          
+          if [ "$SUCCESS" = false ]; then
+            echo "❌ 所有 Clang 下载源均失败"
+            exit 1
+          fi
+          
+          echo "Clang 下载并解压成功，bin 目录：$(pwd)/bin"
           echo "$(pwd)/bin" >> $GITHUB_PATH
         working-directory: ${{ runner.temp }}
 
+      # 下载 GCC 工具链（保持不变）
       - name: 下载 GCC 工具链
         run: |
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b master --depth 1
@@ -191,4 +219,36 @@ jobs:
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld 2>&1 | tee build.log
 
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb .
+            cp out/arch/arm64/boot/Image.gz-dtb ../Image.gz-dtb
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz ../Image.gz
+          else
+            echo "未找到内核镜像文件"
+            exit 1
+          fi
+
+      # 打包 AnyKernel3
+      - name: 准备 AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master AnyKernel3
+        working-directory: ${{ runner.temp }}
+
+      - name: 创建刷机包
+        run: |
+          cp Image.gz-dtb ${{ runner.temp }}/AnyKernel3/ 2>/dev/null || cp Image.gz ${{ runner.temp }}/AnyKernel3/
+          
+          cd ${{ runner.temp }}/AnyKernel3
+          echo "Kernel with rKSU" > README
+          echo "Build date: $(date)" >> README
+          echo "rKSU commit: ${{ github.event.inputs.rksu_commit }}" >> README
+          echo "SUSFS: ${{ github.event.inputs.enable_susfs }}" >> README
+          
+          zip -r9 kernel-$(date +%Y%m%d-%H%M).zip * -x .git README.md *placeholder
+          mv kernel-*.zip $GITHUB_WORKSPACE/
+
+      - name: 上传内核刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-rksu-susfs
+          path: ./*.zip
+          if-no-files-found: error
